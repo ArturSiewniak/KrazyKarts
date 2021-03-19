@@ -23,6 +23,11 @@ public:
 	// Called to bind functionality to input
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UGoKartMovementComponent* MovementComponent;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	UGoKartMovementReplicator* MovementReplicator;
+
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
@@ -31,9 +36,5 @@ private:
 	void MoveForward(float Value);
 	void MoveRight(float Value);
 
-	UPROPERTY(VisibleAnywhere)
-	UGoKartMovementComponent* MovementComponent;
-	UPROPERTY(VisibleAnywhere)
-	UGoKartMovementReplicator* MovementReplicator;
 
 };

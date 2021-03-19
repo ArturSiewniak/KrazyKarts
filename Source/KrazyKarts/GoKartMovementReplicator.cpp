@@ -4,6 +4,8 @@
 #include "GoKartMovementReplicator.h"
 #include "Net/UnrealNetwork.h"
 
+#include "GameFramework/Actor.h"
+
 // Sets default values for this component's properties
 UGoKartMovementReplicator::UGoKartMovementReplicator()
 {
@@ -65,27 +67,60 @@ void UGoKartMovementReplicator::ClientTick(float DeltaTime)
 	if (ClientTimeBetweenLastUpdates < KINDA_SMALL_NUMBER) return;
 	if (MovementComponent == nullptr) return;
 
-	FVector TargetLocation = ServerState.Transform.GetLocation();
 	float LerpRatio = ClientTimeSinceUpdate / ClientTimeBetweenLastUpdates;
-	FVector StartLocation = ClientStartTransform.GetLocation();
-	float VelocityToDerivative = ClientTimeBetweenLastUpdates * 100; //m -> cm;
-	FVector StartDerivative = ClientStartVelocity * VelocityToDerivative;
-	FVector TargetDerivative = ServerState.Velocity * VelocityToDerivative;
+	FHermiteCubicSpline Spline = CreateSpline();
 
-	FVector NewLocation = FMath::CubicInterp(StartLocation, StartDerivative, TargetLocation, TargetDerivative, LerpRatio);
+	InterpolateLocation(Spline, LerpRatio);
 
-	GetOwner()->SetActorLocation(NewLocation);
+	InterpolateVelocity(Spline, LerpRatio);
 
-	FVector NewDerivative = FMath::CubicInterpDerivative(StartLocation, StartDerivative, TargetLocation, TargetDerivative, LerpRatio);
-	FVector NewVelocity = NewDerivative / VelocityToDerivative;
+	InterpolateRotation(LerpRatio);
+}
+
+void UGoKartMovementReplicator::InterpolateLocation(const FHermiteCubicSpline &Spline, float LerpRatio)
+{
+	FVector NewLocation = Spline.InterpolateLocation(LerpRatio);
+	if (MeshOffsetRoot != nullptr)
+	{
+		MeshOffsetRoot->SetWorldLocation(NewLocation);
+	}
+}
+
+void UGoKartMovementReplicator::InterpolateVelocity(const FHermiteCubicSpline &Spline, float LerpRatio)
+{
+	FVector NewDerivative = Spline.InterpolateDerivative(LerpRatio);
+	FVector NewVelocity = NewDerivative / VelocityToDerivative();
 	MovementComponent->SetVelocity(NewVelocity);
+}
 
+void UGoKartMovementReplicator::InterpolateRotation(float LerpRatio)
+{
 	FQuat TargetRotation = ServerState.Transform.GetRotation();
 	FQuat StartRotation = ClientStartTransform.GetRotation();
 
 	FQuat NewRotation = FQuat::Slerp(StartRotation, TargetRotation, LerpRatio);
 
-	GetOwner()->SetActorRotation(NewRotation);
+	if (MeshOffsetRoot != nullptr)
+	{
+		MeshOffsetRoot->SetWorldRotation(NewRotation);
+	}
+}
+
+FHermiteCubicSpline UGoKartMovementReplicator::CreateSpline()
+{
+	FHermiteCubicSpline Spline;
+	Spline.TargetLocation = ServerState.Transform.GetLocation();
+	Spline.StartLocation = ClientStartTransform.GetLocation();
+	Spline.StartDerivative = ClientStartVelocity * VelocityToDerivative();
+	Spline.TargetDerivative = ServerState.Velocity * VelocityToDerivative();
+
+	return Spline;
+}
+
+
+float UGoKartMovementReplicator::VelocityToDerivative()
+{
+	return ClientTimeBetweenLastUpdates * 100; //m->cm
 }
 
 void UGoKartMovementReplicator::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -131,8 +166,14 @@ void UGoKartMovementReplicator::SimulatedProxy_OnRep_ServerState()
 	ClientTimeBetweenLastUpdates = ClientTimeSinceUpdate;
 	ClientTimeSinceUpdate = 0;
 
-	ClientStartTransform = GetOwner()->GetActorTransform();
+	if (MeshOffsetRoot != nullptr)
+	{
+		ClientStartTransform.SetLocation(MeshOffsetRoot->GetComponentLocation());
+		ClientStartTransform.SetRotation(MeshOffsetRoot->GetComponentQuat());
+	}
 	ClientStartVelocity = MovementComponent->GetVelocity();
+
+	GetOwner()->SetActorTransform(ServerState.Transform);
 }
 
 void UGoKartMovementReplicator::ClearAcknowledgeMoves(FGoKartMove LastMove)
@@ -154,6 +195,7 @@ void UGoKartMovementReplicator::Server_SendMove_Implementation(FGoKartMove Move)
 {
 	if (MovementComponent == nullptr) return;
 
+	ClientSimulatedTime += Move.DeltaTime;
 	MovementComponent->SimulateMove(Move);
 
 	UpdateServerState(Move);
@@ -161,5 +203,19 @@ void UGoKartMovementReplicator::Server_SendMove_Implementation(FGoKartMove Move)
 
 bool UGoKartMovementReplicator::Server_SendMove_Validate(FGoKartMove Move)
 {
+	float ProposedTime = ClientSimulatedTime + Move.DeltaTime;
+	bool ClientNotRunningAhead = ProposedTime < GetWorld()->TimeSeconds;
+
+	if (!ClientNotRunningAhead)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Client is running too fast"));
+		return false;
+	}
+
+	if (!Move.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Invalid move"));
+		return false;
+	}
 	return true;
 }
